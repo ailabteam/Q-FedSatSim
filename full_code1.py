@@ -1,5 +1,4 @@
-import os
-import numpy as np
+mport numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -7,34 +6,32 @@ from torchvision import datasets, transforms
 from torch.utils.data import DataLoader, Subset
 import pandas as pd
 import matplotlib.pyplot as plt
+import time
 import dimod
 
-# Thiết lập device cuda:1 nếu có, nếu không dùng cpu
+# Thiết lập device CUDA cụ thể
 device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
 print(f"Using torch device: {device}")
 
-# Tạo thư mục results nếu chưa có
-os.makedirs("./results", exist_ok=True)
-
-# Thiết lập hạt giống ngẫu nhiên để tái tạo kết quả
+# Thiết lập hạt giống để tái tạo kết quả
 np.random.seed(42)
 torch.manual_seed(42)
 
-# Tham số mô phỏng GEO
-N = 100  # Số client
+# Tham số mô phỏng GEO (Giảm kích thước để chạy nhanh)
+N = 30  # Số client (giảm từ 100 xuống 30)
 k = 10   # Số client được chọn mỗi vòng
-num_rounds = 20  # Số vòng
-lambda_ = 0.5    # Hệ số cân bằng latency và accuracy
-gamma = 1.0      # Hệ số phạt ràng buộc k
-geo_latency_range = (480, 560)  # Độ trễ GEO (ms)
+num_rounds = 3  # Giảm số vòng để chạy nhanh hơn
+lambda_ = 0.5
+gamma = 1.0
+geo_latency_range = (480, 560)
 
 # Tạo dữ liệu độ trễ và đóng góp độ chính xác giả lập
-d_i = np.random.uniform(geo_latency_range[0], geo_latency_range[1], N)  # Latency (ms)
-a_i = np.random.uniform(0.7, 0.95, N)  # Accuracy contribution (giả lập)
+d_i = np.random.uniform(geo_latency_range[0], geo_latency_range[1], N)
+a_i = np.random.uniform(0.7, 0.95, N)
 
 # Chuẩn bị dữ liệu MNIST
-print("Loading MNIST dataset...")
 transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5,), (0.5,))])
+print("Loading MNIST dataset...")
 mnist_train = datasets.MNIST(root='./data', train=True, download=True, transform=transform)
 mnist_test = datasets.MNIST(root='./data', train=False, download=True, transform=transform)
 test_loader = DataLoader(mnist_test, batch_size=64, shuffle=False)
@@ -63,14 +60,13 @@ class CNN(nn.Module):
         x = self.fc2(x)
         return x
 
-# Hàm huấn luyện mô hình trên client
-def train_client(model, data_loader, epochs=5):
-    print("  Training client model...")
+# Huấn luyện client (đưa model và data loader)
+def train_client(model, data_loader, epochs=1):
     model.train()
     model.to(device)
     optimizer = optim.SGD(model.parameters(), lr=0.01)
     criterion = nn.CrossEntropyLoss()
-    for epoch in range(epochs):
+    for _ in range(epochs):
         for inputs, labels in data_loader:
             inputs, labels = inputs.to(device), labels.to(device)
             optimizer.zero_grad()
@@ -80,9 +76,8 @@ def train_client(model, data_loader, epochs=5):
             optimizer.step()
     return model
 
-# Hàm đánh giá mô hình toàn cục
+# Đánh giá mô hình toàn cục
 def evaluate_global_model(model, test_loader):
-    print("  Evaluating global model...")
     model.eval()
     model.to(device)
     correct, total = 0, 0
@@ -93,30 +88,27 @@ def evaluate_global_model(model, test_loader):
             _, predicted = torch.max(outputs.data, 1)
             total += labels.size(0)
             correct += (predicted == labels).sum().item()
-    accuracy = 100 * correct / total
-    print(f"  Accuracy: {accuracy:.2f}%")
-    return accuracy
+    return 100 * correct / total
 
-# Hàm FedAvg
+# FedAvg cập nhật mô hình toàn cục
 def fedavg(global_model, selected_clients, client_loaders):
-    print(f"FedAvg on {len(selected_clients)} clients...")
     client_models = []
     for client_id in selected_clients:
+        print(f"  Training client {client_id}")
         client_model = CNN()
         client_model.load_state_dict(global_model.state_dict())
         client_model = train_client(client_model, client_loaders[client_id])
         client_models.append(client_model)
-    
     global_state = global_model.state_dict()
     for key in global_state:
         global_state[key] = torch.mean(torch.stack([cm.state_dict()[key].to(device) for cm in client_models]), dim=0)
     global_model.load_state_dict(global_state)
-    global_model.to(device)
     return global_model
 
-# Hàm chọn client bằng Simulated Annealing dùng dimod
+# Chọn client bằng Simulated Annealing (giảm num_reads, in debug)
 def select_clients_sa(d_i, a_i, k, lambda_=0.5, gamma=1.0):
     print("Selecting clients using Simulated Annealing...")
+    start = time.time()
     Q = {}
     for i in range(N):
         Q[(i, i)] = d_i[i] - lambda_ * a_i[i] + gamma * (1 - 2 * k)
@@ -124,42 +116,40 @@ def select_clients_sa(d_i, a_i, k, lambda_=0.5, gamma=1.0):
         for j in range(i + 1, N):
             Q[(i, j)] = 2 * gamma
     sampler = dimod.SimulatedAnnealingSampler()
-    response = sampler.sample_qubo(Q, num_reads=1000)
+    response = sampler.sample_qubo(Q, num_reads=100)  # Giảm số đọc xuống 100
+    elapsed = time.time() - start
+    print(f"  SA selection done in {elapsed:.2f} seconds")
     best_solution = response.first.sample
     selected = [i for i, val in best_solution.items() if val == 1]
     print(f"  Selected clients (SA): {selected}")
     return selected
 
-# Hàm chọn client bằng Greedy
+# Chọn client bằng Greedy (độ trễ nhỏ nhất)
 def select_clients_greedy(d_i, k):
-    print("Selecting clients using Greedy...")
     selected = np.argsort(d_i)[:k]
-    print(f"  Selected clients (Greedy): {selected}")
+    print(f"Selected clients (Greedy): {selected}")
     return selected
 
-# Hàm chọn client ngẫu nhiên
+# Chọn client ngẫu nhiên
 def select_clients_random(N, k):
-    print("Selecting clients Randomly...")
     selected = np.random.choice(N, k, replace=False)
-    print(f"  Selected clients (Random): {selected}")
+    print(f"Selected clients (Random): {selected}")
     return selected
 
-# Hàm tính độ công bằng
+# Tính độ công bằng
 def calculate_fairness(selection_counts):
     return np.std(list(selection_counts.values()))
 
-# Hàm chạy thực nghiệm cho một phương pháp
+# Chạy thực nghiệm
 def run_experiment(method, d_i, a_i, k, client_loaders, test_loader):
-    print(f"=== Running experiment: {method} ===")
+    print(f"\n=== Running experiment: {method} ===")
     global_model = CNN()
-    global_model.to(device)
     latency_history = []
     accuracy_history = []
     selection_counts = {i: 0 for i in range(N)}
     
     for round in range(num_rounds):
-        print(f"Round {round + 1}/{num_rounds}")
-        # Chọn client
+        print(f"Round {round+1}/{num_rounds}")
         if method == "SA":
             selected_clients = select_clients_sa(d_i, a_i, k, lambda_, gamma)
         elif method == "Greedy":
@@ -167,79 +157,79 @@ def run_experiment(method, d_i, a_i, k, client_loaders, test_loader):
         elif method == "Random":
             selected_clients = select_clients_random(N, k)
         else:
-            raise ValueError(f"Unknown method {method}")
+            raise ValueError("Unknown method")
         
-        # Cập nhật tần suất chọn client
         for client_id in selected_clients:
             selection_counts[client_id] += 1
         
-        # Tính độ trễ
         round_latency = sum(d_i[client_id] for client_id in selected_clients)
         latency_history.append(round_latency)
         
-        # Cập nhật mô hình toàn cục
         global_model = fedavg(global_model, selected_clients, client_loaders)
         
-        # Đánh giá độ chính xác
         accuracy = evaluate_global_model(global_model, test_loader)
         accuracy_history.append(accuracy)
         
-        # Kiểm tra hội tụ (độ chính xác > 90%)
+        print(f"  Round {round+1} latency: {round_latency:.2f} ms, accuracy: {accuracy:.2f}%")
+        
         if accuracy > 90:
-            print(f"Converged at round {round + 1}")
             convergence_rounds = round + 1
+            print(f"  Converged at round {convergence_rounds}")
             break
     else:
         convergence_rounds = num_rounds
-        print(f"Did not converge after {num_rounds} rounds.")
+        print("  Did not converge within max rounds")
     
     fairness = calculate_fairness(selection_counts)
-    print(f"Fairness (std dev of selections): {fairness:.4f}")
     return np.mean(latency_history), np.mean(accuracy_history), convergence_rounds, fairness
 
-# Chạy thực nghiệm cho tất cả phương pháp
+# Chạy tất cả phương pháp và lưu kết quả
 methods = ["SA", "Greedy", "Random"]
 results = {"Method": [], "Latency (s)": [], "Accuracy (%)": [], "Convergence Rounds": [], "Fairness": []}
 
 for method in methods:
     latency, accuracy, rounds, fairness = run_experiment(method, d_i, a_i, k, client_loaders, test_loader)
     results["Method"].append(method)
-    results["Latency (s)"].append(latency / 1000)  # Chuyển sang giây
+    results["Latency (s)"].append(latency / 1000)
     results["Accuracy (%)"].append(accuracy)
     results["Convergence Rounds"].append(rounds)
     results["Fairness"].append(fairness)
 
-# Hiển thị kết quả
 df = pd.DataFrame(results)
 print("\nPerformance Comparison:")
 print(df)
 
-# Trực quan hóa
+# Tạo folder lưu ảnh nếu chưa có
+import os
+output_dir = "./results"
+os.makedirs(output_dir, exist_ok=True)
+
+# Vẽ và lưu biểu đồ
 plt.figure(figsize=(10, 6))
 plt.bar(df["Method"], df["Latency (s)"])
 plt.title("Latency Comparison")
 plt.ylabel("Latency (s)")
-plt.savefig("./results/latency_comparison.png")
+plt.savefig(os.path.join(output_dir, "latency_comparison.png"))
 plt.show()
 
 plt.figure(figsize=(10, 6))
 plt.bar(df["Method"], df["Accuracy (%)"])
 plt.title("Accuracy Comparison")
 plt.ylabel("Accuracy (%)")
-plt.savefig("./results/accuracy_comparison.png")
+plt.savefig(os.path.join(output_dir, "accuracy_comparison.png"))
 plt.show()
 
 plt.figure(figsize=(10, 6))
 plt.bar(df["Method"], df["Convergence Rounds"])
 plt.title("Convergence Rounds Comparison")
 plt.ylabel("Convergence Rounds")
-plt.savefig("./results/convergence_rounds_comparison.png")
+plt.savefig(os.path.join(output_dir, "convergence_rounds_comparison.png"))
 plt.show()
 
 plt.figure(figsize=(10, 6))
 plt.bar(df["Method"], df["Fairness"])
 plt.title("Fairness Comparison")
 plt.ylabel("Fairness (Std of Selection Counts)")
-plt.savefig("./results/fairness_comparison.png")
+plt.savefig(os.path.join(output_dir, "fairness_comparison.png"))
 plt.show()
 
