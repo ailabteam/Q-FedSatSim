@@ -1,3 +1,4 @@
+:q
 import numpy as np
 from dimod import BinaryQuadraticModel
 from dwave.samplers import SimulatedAnnealingSampler
