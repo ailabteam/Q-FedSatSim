@@ -5,119 +5,86 @@ import torch.optim as optim
 import matplotlib.pyplot as plt
 import os
 
-print("Bắt đầu bài toán VQE cho Cân bằng tải Vệ tinh (Phân chia Tập hợp)...")
+print("Bắt đầu bài toán QAOA (Tối ưu hóa cuối cùng)...")
+if not os.path.exists("figures"): os.makedirs("figures")
 
-if not os.path.exists("figures"):
-    os.makedirs("figures")
-
-# --- Bước 1: Định nghĩa Bài toán ---
-data_packets = torch.tensor([10.0, 20.0, 30.0, 40.0])
+# --- Bài toán và Hamiltonian (giữ nguyên) ---
+data_packets = torch.tensor([10.0, 20.0, 30.0, 40.0], dtype=torch.float32)
 n_qubits = len(data_packets)
 dev = qml.device("default.qubit", wires=n_qubits)
+cost_h = qml.Hamiltonian(data_packets.tolist(), [qml.PauliZ(i) for i in range(n_qubits)])
+mixer_h = qml.Hamiltonian([1] * n_qubits, [qml.PauliX(i) for i in range(n_qubits)])
 
-# --- Bước 2: Xây dựng Cost Hamiltonian (đã sửa) ---
-cost_coeffs = []
-cost_obs = []
-
-# Lặp qua tất cả các cặp (i, j) để xây dựng H^2
-for i in range(n_qubits):
-    for j in range(n_qubits):
-        # Khi i == j, Z_i^2 = I. Thuật ngữ này là một hằng số và không ảnh hưởng
-        # đến việc tìm trạng thái cơ bản, nhưng chúng ta có thể thêm vào để
-        # giá trị cost có ý nghĩa vật lý hơn. Tuy nhiên, để đơn giản, ta có thể bỏ qua.
-        # Ở đây ta sẽ thêm vào cho đầy đủ.
-        if i == j:
-            # s_i^2 * Z_i^2 = s_i^2 * I
-            # PennyLane xử lý hằng số này trong Hamiltonian
-            pass # Tạm thời bỏ qua các hằng số vì chúng chỉ dịch chuyển toàn bộ phổ năng lượng
-        else:
-            # s_i * s_j * Z_i * Z_j
-            # Chỉ cần thêm một lần cho mỗi cặp (ví dụ i < j)
-            if i < j:
-                cost_coeffs.append(2 * data_packets[i] * data_packets[j])
-                cost_obs.append(qml.PauliZ(i) @ qml.PauliZ(j))
-
-# Thêm các hằng số từ s_i^2 * I
-# Tổng của các hằng số này là sum(s_i^2)
-constant_term = torch.sum(data_packets**2)
-# Chúng ta có thể thêm nó vào sau, hoặc để Hamiltonian chỉ chứa các phần tương tác.
-# Việc tối ưu sẽ không bị ảnh hưởng.
-
-cost_h = qml.Hamiltonian(cost_coeffs, cost_obs)
-print("Cost Hamiltonian đã được tạo.")
-
-# --- Bước 3: Thiết kế Mạch Ansatz (giữ nguyên) ---
+# --- Mạch QAOA (CẢI TIẾN) ---
+p = 6 # Tăng p lên một chút nữa
 @qml.qnode(dev, interface="torch")
-def vqe_circuit(params):
-    for i in range(n_qubits):
-        qml.Hadamard(wires=i)
-    qml.StronglyEntanglingLayers(params, wires=range(n_qubits))
+def qaoa_circuit(params):
+    gammas, betas = params[0], params[1]
+    for i in range(n_qubits): qml.Hadamard(wires=i)
+    for i in range(p):
+        qml.ApproxTimeEvolution(cost_h, gammas[i], 1)
+        qml.ApproxTimeEvolution(mixer_h, betas[i], 1)
     return qml.expval(cost_h)
 
-# --- Bước 4: Vòng lặp Tối ưu VQE ---
-n_layers = 2
-params = torch.tensor(np.pi * np.random.rand(n_layers, n_qubits, 3), requires_grad=True, dtype=torch.float32)
-optimizer = optim.AdamW([params], lr=0.1)
-epochs = 150
+# --- Vòng lặp Tối ưu (CẢI TIẾN) ---
+params = torch.tensor(np.random.uniform(0, np.pi, (2, p)), requires_grad=True, dtype=torch.float32)
+# Sử dụng Adagrad, một optimizer cẩn thận hơn
+optimizer = optim.Adagrad([params], lr=0.1) 
+epochs = 250 # Tăng thêm epochs
 cost_history = []
 
-print("\nBắt đầu vòng lặp VQE...")
+print("\nBắt đầu vòng lặp QAOA với Adagrad...")
 for epoch in range(epochs):
     optimizer.zero_grad()
-    # Cost được tính từ H^2 đã khai triển
-    cost = vqe_circuit(params)
+    expval_h = qaoa_circuit(params)
+    cost = expval_h**2
     cost.backward()
     optimizer.step()
-    
-    # Để hiển thị đúng giá trị (Sum_A - Sum_B)^2, ta cộng lại hằng số đã bỏ qua
-    cost_with_constant = cost.item() + constant_term.item()
-    cost_history.append(cost_with_constant)
+    cost_history.append(cost.item())
     
     if (epoch + 1) % 10 == 0:
-        print(f"Epoch {epoch+1}/{epochs}, Cost (chênh lệch bình phương): {cost_with_constant:.4f}")
-        
-print("\n--- Huấn luyện hoàn tất! ---")
-final_cost = cost_history[-1]
-print(f"Giá trị cost tối thiểu tìm được: {final_cost:.4f}")
+        print(f"Epoch {epoch+1}/{epochs}, Cost: {cost.item():.4f}")
 
-# --- Bước 5: Diễn giải Kết quả (giữ nguyên) ---
+print("\n--- Huấn luyện hoàn tất! ---")
+
+# --- Diễn giải kết quả ---
 @qml.qnode(dev)
 def get_solution_distribution(params):
-    for i in range(n_qubits):
-        qml.Hadamard(wires=i)
-    qml.StronglyEntanglingLayers(params, wires=range(n_qubits))
+    gammas, betas = params[0], params[1]
+    for i in range(n_qubits): qml.Hadamard(wires=i)
+    for i in range(p):
+        qml.ApproxTimeEvolution(cost_h, gammas[i], 1)
+        qml.ApproxTimeEvolution(mixer_h, betas[i], 1)
     return qml.probs(wires=range(n_qubits))
 
-solution_probs = get_solution_distribution(params.detach().numpy())
-best_solution_index = np.argmax(solution_probs)
-best_solution_binary = format(best_solution_index, f'0{n_qubits}b')
+solution_probs = get_solution_distribution(params.detach())
+print(f"\nPhân phối xác suất của các giải pháp (top 5):")
+top_indices = torch.topk(solution_probs, k=5).indices.numpy()
+top_probs = torch.topk(solution_probs, k=5).values.detach().numpy()
 
-print(f"\nPhân phối xác suất của các giải pháp:\n{np.round(solution_probs, 3)}")
+for i in range(len(top_indices)):
+    sol_idx, sol_prob = top_indices[i], top_probs[i]
+    binary_str = format(sol_idx, f'0{n_qubits}b')
+    print(f"  - Chuỗi bit: {binary_str}, Xác suất: {sol_prob:.3f}")
+
+best_solution_index = top_indices[0]
+best_solution_binary = format(best_solution_index, f'0{n_qubits}b')
 print(f"\nGiải pháp tối ưu nhất được tìm thấy (chuỗi bit): {best_solution_binary}")
 
-set_A, set_B = [], []
-sum_A, sum_B = 0, 0
+set_A, set_B = [], []; sum_A, sum_B = 0, 0
 for i in range(n_qubits):
     if best_solution_binary[i] == '0':
-        set_A.append(data_packets[i].item())
-        sum_A += data_packets[i].item()
+        set_A.append(data_packets[i].item()); sum_A += data_packets[i].item()
     else:
-        set_B.append(data_packets[i].item())
-        sum_B += data_packets[i].item()
+        set_B.append(data_packets[i].item()); sum_B += data_packets[i].item()
 
 print(f"\nPhân chia tối ưu:")
 print(f"  - Vệ tinh A nhận các gói: {set_A} (Tổng: {sum_A:.1f})")
 print(f"  - Vệ tinh B nhận các gói: {set_B} (Tổng: {sum_B:.1f})")
 print(f"  - Chênh lệch bình phương thực tế: {(sum_A - sum_B)**2:.4f}")
 
-# --- Trực quan hóa ---
-plt.figure(figsize=(10, 6))
-plt.plot(cost_history)
-plt.title("VQE for Satellite Load Balancing (Number Partitioning)")
-plt.xlabel("Optimization Step (Epoch)")
-plt.ylabel("Cost (Squared Difference)")
-plt.grid(True)
-figure_path = "figures/vqe_load_balancing.png"
-plt.savefig(figure_path)
-print(f"\nBiểu đồ hội tụ đã được lưu tại: {figure_path}")
-plt.close()
+plt.figure(figsize=(10, 6)); plt.plot(cost_history)
+plt.title("QAOA for Satellite Load Balancing (Final Attempt)")
+plt.xlabel("Optimization Step"); plt.ylabel("Cost")
+plt.grid(True); figure_path = "figures/qaoa_load_balancing_final.png"
+plt.savefig(figure_path); print(f"\nBiểu đồ hội tụ đã được lưu tại: {figure_path}"); plt.close()
