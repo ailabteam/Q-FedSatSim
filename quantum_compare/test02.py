@@ -23,50 +23,26 @@ torch.manual_seed(42)
 # ==============================================================================
 # BƯỚC 1: TẢI VÀ TIỀN XỬ LÝ DỮ LIỆU
 # ==============================================================================
-# Tải dữ liệu
-data = load_breast_cancer()
-X, y = data.data, data.target
-# Chuyển nhãn về {1, -1} cho SVM
+data = load_breast_cancer(); X, y = data.data, data.target
 y = y * 2 - 1
-
-# Chia dữ liệu
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
-
-# Chuẩn hóa dữ liệu
-scaler = StandardScaler()
-X_train_scaled = scaler.fit_transform(X_train)
-X_test_scaled = scaler.transform(X_test)
-
-# Giảm chiều dữ liệu để đưa vào mạch lượng tử
+scaler = StandardScaler(); X_train_scaled = scaler.fit_transform(X_train); X_test_scaled = scaler.transform(X_test)
 N_QUBITS = 4
-pca = PCA(n_components=N_QUBITS)
-X_train_pca = pca.fit_transform(X_train_scaled)
-X_test_pca = pca.transform(X_test_scaled)
-
+pca = PCA(n_components=N_QUBITS); X_train_pca = pca.fit_transform(X_train_scaled); X_test_pca = pca.transform(X_test_scaled)
 print(f"Dữ liệu đã được xử lý. Số chiều sau PCA: {N_QUBITS}")
 
 # ==============================================================================
 # ĐỊNH NGHĨA CÁC MÔ HÌNH
 # ==============================================================================
-
-# --- 1. Classical SVM ---
 def train_classical_svm(X_train, y_train):
-    svm = SVC(kernel='rbf', C=1.0, gamma='scale')
-    svm.fit(X_train, y_train)
-    return svm
+    svm = SVC(kernel='rbf', C=1.0, gamma='scale'); svm.fit(X_train, y_train); return svm
 
-# --- 2. Classical MLP ---
 class ClassicalMLP(nn.Module):
     def __init__(self, input_dim):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(input_dim, 16), nn.ReLU(),
-            nn.Linear(16, 8), nn.ReLU(),
-            nn.Linear(8, 1)
-        )
+        self.net = nn.Sequential(nn.Linear(input_dim, 16), nn.ReLU(), nn.Linear(16, 8), nn.ReLU(), nn.Linear(8, 1))
     def forward(self, x): return self.net(x)
 
-# --- 3. Quantum SVM ---
 dev_qsvm = qml.device("default.qubit", wires=N_QUBITS)
 @qml.qnode(dev_qsvm)
 def qsvm_kernel_circuit(x1, x2):
@@ -81,7 +57,6 @@ def qsvm_kernel_matrix(A, B):
             matrix[i, j] = qsvm_kernel_circuit(x1, x2)[0]
     return matrix
 
-# --- 4. Hybrid QNN ---
 dev_qnn = qml.device("default.qubit", wires=N_QUBITS)
 @qml.qnode(dev_qnn, interface="torch", diff_method="backprop")
 def qnn_circuit(inputs, weights):
@@ -93,10 +68,19 @@ class HybridQNN(nn.Module):
     def __init__(self, n_qubits):
         super().__init__()
         self.q_params = nn.Parameter(0.1 * torch.randn(2, n_qubits, 3))
+        # Thêm một lớp cổ điển để xử lý đầu ra, giúp ổn định và mạnh hơn
+        self.classical_layer = nn.Linear(1, 1)
+
     def forward(self, x):
-        # Cần vòng lặp vì qnode chưa hỗ trợ batching tốt cho AngleEmbedding + expval
-        results = torch.tensor([qnn_circuit(inp, self.q_params) for inp in x])
-        return results.view(-1, 1)
+        # SỬA LỖI Ở ĐÂY
+        # 1. Tạo list kết quả từ qnode
+        results_list = [qnn_circuit(inp, self.q_params) for inp in x]
+        
+        # 2. Dùng torch.stack để gộp lại, bảo toàn gradient
+        q_out = torch.stack(results_list).view(-1, 1)
+        
+        # 3. Đưa qua lớp cổ điển để có logit cuối cùng
+        return self.classical_layer(q_out.float())
 
 
 # ==============================================================================
@@ -104,7 +88,6 @@ class HybridQNN(nn.Module):
 # ==============================================================================
 results = {}
 
-# --- Helper function for training MLP/QNN ---
 def train_torch_model(model, X_train, y_train, epochs=100):
     dataset = TensorDataset(torch.tensor(X_train, dtype=torch.float32), torch.tensor(y_train, dtype=torch.float32).view(-1, 1))
     loader = DataLoader(dataset, batch_size=32, shuffle=True)
@@ -115,7 +98,8 @@ def train_torch_model(model, X_train, y_train, epochs=100):
         for data, target in loader:
             optimizer.zero_grad()
             output = model(data)
-            loss = loss_fn(output, (target + 1) / 2) # Chuyển y từ {-1,1} về {0,1} cho loss
+            # Chuyển y từ {-1,1} về {0,1} cho loss
+            loss = loss_fn(output, (target + 1) / 2)
             loss.backward()
             optimizer.step()
     return model
@@ -123,14 +107,13 @@ def train_torch_model(model, X_train, y_train, epochs=100):
 # --- Main Evaluation Loop ---
 models_to_test = {
     "Classical SVM (RBF)": train_classical_svm,
-    "Classical MLP": ClassicalMLP(X_train_pca.shape[1]), # Dùng PCA data để công bằng
+    "Classical MLP": ClassicalMLP(X_train_pca.shape[1]),
     "QSVM": "precomputed",
     "Hybrid QNN": HybridQNN(N_QUBITS)
 }
 
 for name, model_or_func in models_to_test.items():
     print(f"\n--- Đang xử lý: {name} ---")
-    
     start_time = time.time()
     
     if name == "Classical SVM (RBF)":
@@ -140,7 +123,8 @@ for name, model_or_func in models_to_test.items():
     elif name == "Classical MLP":
         model = train_torch_model(model_or_func, X_train_pca, y_train)
         with torch.no_grad():
-            y_pred = torch.sign(model(torch.tensor(X_test_pca, dtype=torch.float32))).numpy().flatten()
+            logits = model(torch.tensor(X_test_pca, dtype=torch.float32))
+            y_pred = torch.sign(logits).numpy().flatten()
         params = sum(p.numel() for p in model.parameters())
     elif name == "QSVM":
         kernel_train = qsvm_kernel_matrix(X_train_pca, X_train_pca)
@@ -151,36 +135,37 @@ for name, model_or_func in models_to_test.items():
     elif name == "Hybrid QNN":
         model = train_torch_model(model_or_func, X_train_pca, y_train)
         with torch.no_grad():
-            y_pred = torch.sign(model(torch.tensor(X_test_pca, dtype=torch.float32))).numpy().flatten()
+            logits = model(torch.tensor(X_test_pca, dtype=torch.float32))
+            y_pred = torch.sign(logits).numpy().flatten()
         params = sum(p.numel() for p in model.parameters())
         
     end_time = time.time()
     
+    # Ép kiểu y_test để tính metric
+    y_test_numeric = np.array(y_test, dtype=float)
+    y_pred_numeric = np.array(y_pred, dtype=float)
+
     results[name] = {
-        "Accuracy": accuracy_score(y_test, y_pred),
-        "Precision": precision_score(y_test, y_pred),
-        "Recall": recall_score(y_test, y_pred),
-        "F1-Score": f1_score(y_test, y_pred),
+        "Accuracy": accuracy_score(y_test_numeric, y_pred_numeric),
+        "Precision": precision_score(y_test_numeric, y_pred_numeric),
+        "Recall": recall_score(y_test_numeric, y_pred_numeric),
+        "F1-Score": f1_score(y_test_numeric, y_pred_numeric),
         "Train Time (s)": end_time - start_time,
         "Parameters": params,
-        "Confusion Matrix": confusion_matrix(y_test, y_pred).ravel() # (tn, fp, fn, tp)
+        "Confusion Matrix": confusion_matrix(y_test_numeric, y_pred_numeric).ravel()
     }
-
 # ==============================================================================
 # HIỂN THỊ KẾT QUẢ
 # ==============================================================================
 df_results = pd.DataFrame.from_dict(results, orient='index')
-# Sắp xếp lại cột cho đẹp
 df_results = df_results[["F1-Score", "Accuracy", "Precision", "Recall", "Parameters", "Train Time (s)", "Confusion Matrix"]]
 
 print("\n\n" + "="*80)
 print("BẢNG SO SÁNH KẾT QUẢ CUỐI CÙNG")
 print("="*80)
 print(df_results.to_string(formatters={
-    'F1-Score': '{:.4f}'.format,
-    'Accuracy': '{:.4f}'.format,
-    'Precision': '{:.4f}'.format,
-    'Recall': '{:.4f}'.format,
+    'F1-Score': '{:.4f}'.format, 'Accuracy': '{:.4f}'.format,
+    'Precision': '{:.4f}'.format, 'Recall': '{:.4f}'.format,
     'Train Time (s)': '{:.2f}'.format
 }))
 print("\n*Chú thích Ma trận Nhầm lẫn: (TN, FP, FN, TP)")
